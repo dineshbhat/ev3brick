@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/ev3go/ev3dev"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -35,12 +38,27 @@ const (
 	I2C4 = "i2c4"
 )
 
+//mutext to lock while updating err
+var mut sync.Mutex
+
 //EV3Brick - brick details. Models the ev3 brick for easier coding
 type EV3Brick struct {
-	Motors [4]*ev3dev.TachoMotor
-	Sensor [4]*ev3dev.Sensor
+	MotorsMap  map[string]*ev3dev.TachoMotor
+	SensorsMap map[string]*ev3dev.Sensor
 
 	err error
+}
+
+//MotorParams motor parameters
+type MotorParams struct {
+	Speed     int
+	TimeInMs  int
+	Rotations int
+	Degrees   int
+	StopMode  string
+	Mode      string
+	RampUp    int
+	RampDown  int
 }
 
 //Brick Instance of Brick
@@ -60,16 +78,16 @@ var SensorDrivers = []string{
 	"lego-ev3-gyro",
 }
 
-//OutputOutPorts - array of output ports
-var OutputOutPorts = []string{
+//OutputPorts - array of output ports
+var OutputPorts = []string{
 	OutPortA,
 	OutPortB,
 	OutPortC,
 	OutPortD,
 }
 
-//InputOutPorts - array of input ports
-var InputOutPorts = []string{
+//InputPorts - array of input ports
+var InputPorts = []string{
 	InPort1,
 	InPort2,
 	InPort3,
@@ -88,53 +106,102 @@ var I2CPorts = []string{
 //Init - Initialize EV3 EV3Brick
 //Read input and output ports and load the motor and sensors
 func (e *EV3Brick) Init() error {
+	e.MotorsMap = make(map[string]*ev3dev.TachoMotor)
 	// Get the motors
-	for i, p := range OutputOutPorts {
+	for _, p := range OutputPorts {
 		for _, d := range MotorDrivers {
 			m, err := ev3dev.TachoMotorFor(p, d)
 			if err != nil {
 				log.Printf("failed to find %s on %s", d, p)
 			} else {
-				e.Motors[i] = m
+				e.MotorsMap[p] = m
 				break
 			}
 		}
 	}
-	for i, p := range InputOutPorts {
-		for _, d := range SensorDrivers {
-			for _, i2c := range I2CPorts {
-				np := p
-				if i2c != "" {
-					np = fmt.Sprintf("%s:%s", p, i2c)
-				}
-				s, err := ev3dev.SensorFor(np, d)
-				if err != nil {
-					log.Printf("failed to find %s on %s", d, np)
-				} else {
-					e.Sensor[i] = s
-					break
+	e.SensorsMap = make(map[string]*ev3dev.Sensor)
+	var wg sync.WaitGroup
+	wg.Add(len(InputPorts))
+	for i, p := range InputPorts {
+		go func(port string, index int) {
+			for _, d := range SensorDrivers {
+				for _, i2c := range I2CPorts {
+					np := port
+					if i2c != "" {
+						np = fmt.Sprintf("%s:%s", port, i2c)
+					}
+					s, err := ev3dev.SensorFor(np, d)
+					if err != nil {
+						log.Printf("failed to find %s on %s", d, np)
+					} else {
+						e.SensorsMap[port] = s
+						break
+					}
 				}
 			}
-		}
+			wg.Done()
+		}(p, i)
 	}
+	wg.Wait()
 	return nil
 }
 
 func (e EV3Brick) String() string {
 	var buf bytes.Buffer
 	buf.WriteString("EV3Brick:\n")
-	for i, m := range e.Motors {
-		if m != nil {
-			buf.WriteString(fmt.Sprintf("	%d]%+v\n", i, *m))
-		}
+	for k, v := range e.MotorsMap {
+		buf.WriteString(fmt.Sprintf("	%s]%+v\n", k, *v))
 	}
-	for i, s := range e.Sensor {
-		if s != nil {
-			buf.WriteString(fmt.Sprintf("	%d]%+v\n", i, *s))
-		}
+	for k, v := range e.SensorsMap {
+		buf.WriteString(fmt.Sprintf("	%s]%+v\n", k, *v))
 	}
 	return buf.String()
 }
 
-//RunMotorForever - run motor for ever
-// func (e *EV3EV3Brick) RunMotorForever(port )
+//RunForTime - Run Motor for time
+func (e *EV3Brick) RunForTime(port string, speed int, timeInSecs int) error {
+	m := e.MotorsMap[port]
+	if m == nil {
+		return errors.New(fmt.Sprintf("Cannot find motor at port %s", port))
+	}
+
+	m.SetSpeedSetpoint(speed)
+	m.SetTimeSetpoint(time.Duration(timeInSecs) * time.Millisecond)
+	m.Command("run-timed")
+	return m.Err()
+}
+
+//RunForRotation - Run Motor for rotations
+func (e *EV3Brick) RunForRotation(port string, speed int, rot int) error {
+	m := e.MotorsMap[port]
+	if m == nil {
+		return errors.New(fmt.Sprintf("Cannot find motor at port %s", port))
+	}
+	cpr := m.CountPerRot()
+	m.SetSpeedSetpoint(speed)
+	m.SetPositionSetpoint(cpr * rot)
+	m.Command("run-to-rel-pos")
+	return m.Err()
+}
+
+//MoveTankRotation - Move left and right motors for rotation
+func (e *EV3Brick) MoveTankRotation(portLeft string, portRight string, speedLeft int, speedRight int, rot int) error {
+	go func() {
+		err := e.RunForRotation(portLeft, speedLeft, rot)
+		if err != nil {
+			mut.Lock()
+			defer mut.Unlock()
+			e.err = errors.Wrap(e.err, err.Error())
+		}
+	}()
+	go func() {
+		err := e.RunForRotation(portRight, speedRight, rot)
+		if err != nil {
+			mut.Lock()
+			defer mut.Unlock()
+			e.err = errors.Wrap(e.err, err.Error())
+		}
+	}()
+
+	return e.err
+}
