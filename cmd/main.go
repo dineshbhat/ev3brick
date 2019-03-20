@@ -20,7 +20,8 @@ func main() {
 	log.Printf("%+v", *ev3brick.Brick)
 
 	log.Println("Run for time")
-	err = b.RunForTime(ev3brick.OutPortA, 500, 5000)
+	m := b.MotorsMap[ev3brick.OutPortA]
+	err = m.RunForTime(500, 5000)
 	if err != nil {
 		log.Println(err)
 	}
@@ -28,13 +29,14 @@ func main() {
 	log.Println("Run for rotation")
 	time.Sleep(5 * time.Second)
 
-	err = b.RunForRotation(ev3brick.OutPortA, 200, 1)
+	err = m.RunForRotation(200, 1)
 	if err != nil {
 		log.Println(err)
 	}
 	log.Println("MoveTank for rotation")
 	time.Sleep(5 * time.Second)
-	err = b.MoveTankRotation(ev3brick.OutPortA, ev3brick.OutPortD, 500, 500, 2)
+	b.SetDrive(ev3brick.OutPortA, ev3brick.OutPortB, ev3brick.InPort2, ev3brick.InPort3)
+	err = b.Drive.RunForRotation(500, 2)
 	if err != nil {
 		log.Println(err)
 	}
